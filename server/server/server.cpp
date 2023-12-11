@@ -1,72 +1,102 @@
-﻿#define _CRT_SECURE_NO_WARNINGS
-#include <iostream>
-#include <winsock2.h>
-#include <string>
+﻿#include <iostream>
+#include <WS2tcpip.h>
+#include <vector>
+#include <thread>
+#include <mutex>
+
 #pragma comment(lib, "ws2_32.lib")
 
-int main() {
-    WSADATA wsaData;
-    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
-        std::cerr << "Failed to initialize winsock." << std::endl;
-        return 1;
-    }
+std::vector<SOCKET> clients;
+std::mutex clients_mutex;
+std::mutex cout_mutex;
 
-    SOCKET serverSocket;
-    if ((serverSocket = socket(AF_INET, SOCK_STREAM, 0)) == INVALID_SOCKET) {
-        std::cerr << "Failed to create socket." << std::endl;
-        return 1;
-    }
-
-    SOCKADDR_IN serverAddr;
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(8000);
-    serverAddr.sin_addr.s_addr = INADDR_ANY;
-    if (bind(serverSocket, (struct sockaddr*)&serverAddr, sizeof(serverAddr)) == SOCKET_ERROR) {
-        std::cerr << "Failed to bind socket." << std::endl;
-        closesocket(serverSocket);
-        return 1;
-    }
-
-    if (listen(serverSocket, SOMAXCONN) == SOCKET_ERROR) {
-        std::cerr << "Failed to listen on socket." << std::endl;
-        closesocket(serverSocket);
-        return 1;
-    }
-
-    std::cout << "Server listening on port 8000..." << std::endl;
-
-    SOCKET clientSocket;
-    SOCKADDR_IN clientAddr;
-    int clientAddrSize = sizeof(clientAddr);
-
-    if ((clientSocket = accept(serverSocket, (struct sockaddr*)&clientAddr, &clientAddrSize)) == INVALID_SOCKET) {
-        std::cerr << "Failed to accept client connection." << std::endl;
-        closesocket(serverSocket);
-        return 1;
-    }
-
-    char buffer[4096];
-    std::string message;
-
+void HandleClient(SOCKET clientSocket) {
+    char buf[4096];
     while (true) {
-        memset(buffer, 0, sizeof(buffer));
-        int bytesRead = recv(clientSocket, buffer, sizeof(buffer) - 1, 0);
-        if (bytesRead <= 0) {
+        // Receive data
+        ZeroMemory(buf, sizeof(buf));
+        int bytesReceived = recv(clientSocket, buf, sizeof(buf), 0);
+        if (bytesReceived == SOCKET_ERROR) {
+            std::cerr << "Error receiving data! Error code: " << WSAGetLastError() << std::endl;
             break;
         }
 
-        message = buffer;
-        std::cout << "Received message from client: " << message << std::endl;
+        if (bytesReceived == 0) {
+            std::cout << "Client disconnected" << std::endl;
+            break;
+        }
 
-        std::cout << "Enter your response: ";
-        std::getline(std::cin, message);
-        strcpy(buffer, message.c_str());
-        send(clientSocket, buffer, strlen(buffer), 0);
+        // Send data to other clients (here, just output to the console)
+        {
+            std::lock_guard<std::mutex> lock(cout_mutex);
+            std::cout << "Received message from client: " << buf << std::endl;
+            send(clientSocket, buf, bytesReceived, 0);
+        }
+
     }
 
-    std::cout << "Client disconnected." << std::endl;
-    closesocket(clientSocket);
-    closesocket(serverSocket);
+    // Remove the closed client from the list
+    {
+        std::lock_guard<std::mutex> lock(clients_mutex);
+        auto it = std::find(clients.begin(), clients.end(), clientSocket);
+        if (it != clients.end()) {
+            closesocket(clientSocket);
+            clients.erase(it);
+        }
+    }
+}
+
+int main() {
+    // Initialize Winsock
+    WSADATA wsData;
+    WORD ver = MAKEWORD(2, 2);
+    int wsOK = WSAStartup(ver, &wsData);
+    if (wsOK != 0) {
+        std::cerr << "Unable to initialize Winsock! Error code: " << wsOK << std::endl;
+        return -1;
+    }
+
+    // Create a socket
+    SOCKET listening = socket(AF_INET, SOCK_STREAM, 0);
+    if (listening == INVALID_SOCKET) {
+        std::cerr << "Unable to create socket! Error code: " << WSAGetLastError() << std::endl;
+        WSACleanup();
+        return -1;
+    }
+
+    // Bind the socket to an address and port
+    sockaddr_in hint;
+    hint.sin_family = AF_INET;
+    hint.sin_port = htons(54000);
+    hint.sin_addr.S_un.S_addr = INADDR_ANY;
+    bind(listening, (sockaddr*)&hint, sizeof(hint));
+
+    // Listen for incoming connections
+    listen(listening, SOMAXCONN);
+
+    std::cout << "Waiting for connections..." << std::endl;
+
+    // Accept clients in a loop
+    while (true) {
+        // Accept a client connection
+        SOCKET clientSocket = accept(listening, NULL, NULL);
+        std::cout << "Client connected!" << std::endl;
+
+        // Add the client to the list
+        {
+            std::lock_guard<std::mutex> lock(clients_mutex);
+            clients.push_back(clientSocket);
+        }
+
+        // Create a thread to handle the client
+        std::thread clientThread(HandleClient, clientSocket);
+        clientThread.detach(); // Detach the thread from the main server thread
+    }
+
+    // Close the listening socket
+    closesocket(listening);
+
+    // Clean up Winsock
     WSACleanup();
 
     return 0;
